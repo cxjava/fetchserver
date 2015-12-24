@@ -3,20 +3,21 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"compress/flate"
-	"compress/gzip"
-	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
-	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/phuslu/fetchserver/Godeps/_workspace/src/github.com/klauspost/compress/flate"
+	"github.com/phuslu/fetchserver/Godeps/_workspace/src/github.com/klauspost/compress/gzip"
+	"github.com/phuslu/fetchserver/Godeps/_workspace/src/github.com/valyala/fasthttp"
 )
 
 const (
@@ -25,30 +26,19 @@ const (
 )
 
 var (
-	secureTransport *http.Transport = &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: false,
-			ClientSessionCache: tls.NewLRUClientSessionCache(1000),
+	readerPool = sync.Pool{
+		New: func() interface{} {
+			return flate.NewReader(strings.NewReader(""))
 		},
-		TLSHandshakeTimeout: 30 * time.Second,
-		MaxIdleConnsPerHost: 4,
-		DisableCompression:  false,
 	}
-
-	insecureTransport *http.Transport = &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-			ClientSessionCache: tls.NewLRUClientSessionCache(1000),
+	bPool = sync.Pool{
+		New: func() interface{} {
+			return bytes.NewBuffer(make([]byte, 0, 4<<10))
 		},
-		TLSHandshakeTimeout: 30 * time.Second,
-		MaxIdleConnsPerHost: 4,
-		DisableCompression:  false,
 	}
 )
 
 func main() {
-	http.HandleFunc("/", handler)
-
 	parts := []string{"", "8080"}
 
 	for i, keys := range [][]string{{"VCAP_APP_HOST", "HOST"}, {"VCAP_APP_PORT", "PORT"}} {
@@ -61,14 +51,20 @@ func main() {
 
 	addr := strings.Join(parts, ":")
 	fmt.Fprintf(os.Stdout, "Start ListenAndServe on %v\n", addr)
-	err := http.ListenAndServe(addr, nil)
-	if err != nil {
+	if err := fasthttp.ListenAndServe(addr, handler); err != nil {
 		panic(err)
 	}
 }
 
-func ReadRequest(r io.Reader) (req *http.Request, err error) {
-	req = new(http.Request)
+func ReadRequest(li *io.LimitedReader) (req *fasthttp.Request, err error) {
+	req = fasthttp.AcquireRequest()
+
+	r := readerPool.Get().(io.ReadCloser)
+	r.(flate.Resetter).Reset(li, nil)
+	defer func() {
+		r.Close()
+		readerPool.Put(r)
+	}()
 
 	scanner := bufio.NewScanner(r)
 	if scanner.Scan() {
@@ -78,19 +74,14 @@ func ReadRequest(r io.Reader) (req *http.Request, err error) {
 			err = fmt.Errorf("Invaild Request Line: %#v", line)
 			return
 		}
+		req.Header.SetMethod(parts[0])
+		req.SetRequestURI(parts[1])
 
-		req.Method = parts[0]
-		req.RequestURI = parts[1]
-		req.Proto = "HTTP/1.1"
-		req.ProtoMajor = 1
-		req.ProtoMinor = 1
-
-		if req.URL, err = url.Parse(req.RequestURI); err != nil {
+		if u, er := url.Parse(parts[1]); er != nil {
 			return
+		} else {
+			req.Header.Set("Host", u.Host)
 		}
-		req.Host = req.URL.Host
-
-		req.Header = http.Header{}
 	}
 
 	for scanner.Scan() {
@@ -99,138 +90,112 @@ func ReadRequest(r io.Reader) (req *http.Request, err error) {
 		if len(parts) != 2 {
 			continue
 		}
-
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
-		req.Header.Add(key, value)
+		req.Header.Set(key, value)
 	}
 
 	if err = scanner.Err(); err != nil {
 		// ignore
 	}
 
-	if cl := req.Header.Get("Content-Length"); cl != "" {
-		if req.ContentLength, err = strconv.ParseInt(cl, 10, 64); err != nil {
-			return
-		}
-	}
-
-	req.Host = req.URL.Host
-	if req.Host == "" {
-		req.Host = req.Header.Get("Host")
-	}
-
 	return
 }
 
-func httpError(rw http.ResponseWriter, err string, code int) {
-	rw.WriteHeader(http.StatusOK)
-	fmt.Fprintf(rw, "HTTP/1.1 %d\r\n", code)
-	fmt.Fprintf(rw, "Content-Length: %d\r\n", len(err))
-	fmt.Fprintf(rw, "Content-Type: text/plain\r\n")
-	io.WriteString(rw, "\r\n")
-	io.WriteString(rw, err)
-}
-
-func handler(rw http.ResponseWriter, req *http.Request) {
+func handler(ctx *fasthttp.RequestCtx) {
 	var err error
 
 	logger := log.New(os.Stdout, "index.go: ", 0)
 
+	body := bPool.Get().(*bytes.Buffer) // io.ReadWriter
+	body.Write(ctx.Request.Body())
+	defer func() {
+		body.Reset()
+		bPool.Put(body)
+	}()
+
 	var hdrLen uint16
-	if err := binary.Read(req.Body, binary.BigEndian, &hdrLen); err != nil {
-		parts := strings.Split(req.Host, ".")
+	if err := binary.Read(body, binary.BigEndian, &hdrLen); err != nil {
+		parts := strings.Split(string(ctx.Host()), ".")
 		switch len(parts) {
 		case 1, 2:
-			httpError(rw, "fetchserver:"+err.Error(), http.StatusBadRequest)
+			ctx.Error("fetchserver:"+err.Error(), fasthttp.StatusBadRequest)
 		default:
-			u := *req.URL
-			if u.Scheme == "" {
-				u.Scheme = "http"
+			u := ctx.URI()
+			if len(u.Scheme()) == 0 {
+				u.SetScheme("http")
 			}
-			u.Host = fmt.Sprintf("phuslu-%d.%s", time.Now().Nanosecond(), strings.Join(parts[1:], "."))
-			if resp, err := http.Get(u.String()); err == nil {
-				defer resp.Body.Close()
-				for key, values := range resp.Header {
-					for _, value := range values {
-						rw.Header().Add(key, value)
-					}
-				}
-				rw.WriteHeader(resp.StatusCode)
-				io.Copy(rw, resp.Body)
+			u.SetHost(fmt.Sprintf("phuslu-%d.%s", time.Now().Nanosecond(), strings.Join(parts[1:], ".")))
+			if statusCode, body, err := fasthttp.Get(nil, u.String()); err == nil {
+				ctx.SetStatusCode(statusCode)
+				ctx.Write(body)
 			} else {
-				u.Host = "www." + strings.Join(parts[1:], ".")
-				http.Redirect(rw, req, u.String(), 301)
+				u.SetHost("www." + strings.Join(parts[1:], "."))
+				ctx.Redirect(u.String(), 301)
 			}
 		}
 		return
 	}
 
-	req1, err := ReadRequest(flate.NewReader(&io.LimitedReader{R: req.Body, N: int64(hdrLen)}))
-	req1.Body = req.Body
+	req1, err := ReadRequest(&io.LimitedReader{R: body, N: int64(hdrLen)})
+	req1.SetBody(body.Bytes())
 
-	if ce := req1.Header.Get("Content-Encoding"); ce != "" {
+	if ce := string(req1.Header.Peek("Content-Encoding")); ce != "" {
 		var r io.Reader
+		bufb := bytes.NewBuffer(req1.Body())
 		switch ce {
 		case "deflate":
-			r = flate.NewReader(req1.Body)
+			r = flate.NewReader(bufb)
 		case "gzip":
-			if r, err = gzip.NewReader(req1.Body); err != nil {
-				httpError(rw, "fetchserver:"+err.Error(), http.StatusBadRequest)
+			if r, err = gzip.NewReader(bufb); err != nil {
+				ctx.Error("fetchserver:"+err.Error(), fasthttp.StatusBadRequest)
 				return
 			}
 		default:
-			httpError(rw, "fetchserver:"+fmt.Sprintf("Unsupported Content-Encoding: %#v", ce), http.StatusBadRequest)
+			ctx.Error("fetchserver:"+fmt.Sprintf("Unsupported Content-Encoding: %#v", ce), fasthttp.StatusBadRequest)
 			return
 		}
 		data, err := ioutil.ReadAll(r)
 		if err != nil {
-			req1.Body.Close()
-			httpError(rw, "fetchserver:"+err.Error(), http.StatusBadRequest)
+			req1.ResetBody()
+			ctx.Error("fetchserver:"+err.Error(), fasthttp.StatusBadRequest)
 			return
 		}
-		req1.Body.Close()
-		req1.Body = ioutil.NopCloser(bytes.NewReader(data))
-		req1.ContentLength = int64(len(data))
-		req1.Header.Set("Content-Length", strconv.FormatInt(req1.ContentLength, 10))
+		req1.ResetBody()
+		req1.SetBody(data)
+		req1.Header.Set("Content-Length", strconv.FormatInt(int64(len(data)), 10))
 		req1.Header.Del("Content-Encoding")
 	}
 
-	logger.Printf("%s \"%s %s %s\" - -", req.RemoteAddr, req1.Method, req1.URL.String(), req1.Proto)
+	logger.Printf("%s \"%s %s -%+v\"- -", ctx.RemoteAddr(), string(req1.Header.Method()), string(req1.URI().FullURI()), string(req1.Body()))
 
-	var paramsPreifx string = http.CanonicalHeaderKey("X-UrlFetch-")
+	var paramsPreifx string = "X-Urlfetch-"
 	params := map[string]string{}
-	for key, values := range req1.Header {
-		if strings.HasPrefix(key, paramsPreifx) {
-			params[strings.ToLower(key[len(paramsPreifx):])] = values[0]
+	visitHeader := func(key, value []byte) {
+		if strings.HasPrefix(string(key), paramsPreifx) {
+			params[strings.ToLower(string(key[len(paramsPreifx):]))] = string(value)
 		}
 	}
+	req1.Header.VisitAll(visitHeader)
 
 	for _, key := range params {
 		req1.Header.Del(paramsPreifx + key)
 	}
-
 	if Password != "" {
 		if password, ok := params["password"]; !ok || password != Password {
-			httpError(rw, fmt.Sprintf("fetchserver: wrong password %#v", password), http.StatusForbidden)
+			ctx.Error(fmt.Sprintf("fetchserver: wrong password %#v", password), fasthttp.StatusForbidden)
 			return
 		}
 	}
 
-	transport := insecureTransport
-	if v, ok := params["sslverify"]; ok && v == "1" {
-		transport = secureTransport
-	}
-
-	var resp *http.Response
+	var resp = fasthttp.AcquireResponse()
 	for i := 0; i < 2; i++ {
-		resp, err = transport.RoundTrip(req1)
+		err = fasthttp.Do(req1, resp)
 		if err == nil {
 			break
 		}
-
-		if resp != nil && resp.Body != nil {
-			resp.Body.Close()
+		if resp != nil && resp.Body() != nil {
+			fasthttp.ReleaseResponse(resp)
 		}
 
 		if err1, ok := err.(interface {
@@ -239,61 +204,12 @@ func handler(rw http.ResponseWriter, req *http.Request) {
 			time.Sleep(1 * time.Second)
 			continue
 		}
-
-		httpError(rw, "fetchserver:"+err.Error(), http.StatusBadGateway)
+		ctx.Error("fetchserver:"+err.Error(), fasthttp.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
-
-	// rewise resp.Header
-	resp.Header.Del("Transfer-Encoding")
-	if resp.ContentLength > 0 {
-		resp.Header.Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
-	}
-
-	needCrypto := false
-	if v, ok := params["https"]; !ok || v == "0" {
-		switch strings.Split(resp.Header.Get("Content-Type"), "/")[0] {
-		case "image", "audio", "video":
-			break
-		default:
-			needCrypto = true
-		}
-	}
-
-	var w io.Writer = rw
-	if needCrypto {
-		rw.Header().Set("Content-Type", "image/gif")
-		w = newXorWriter(rw, []byte(Password))
-	} else {
-		rw.Header().Set("Content-Type", "image/x-png")
-	}
-
-	rw.WriteHeader(http.StatusOK)
-
-	fmt.Fprintf(w, "%s %s\r\n", resp.Proto, resp.Status)
-	resp.Header.Write(w)
-	io.WriteString(w, "\r\n")
-	io.Copy(w, resp.Body)
-}
-
-type xorWriter struct {
-	w   io.Writer
-	key []byte
-}
-
-func newXorWriter(w io.Writer, key []byte) io.Writer {
-	x := new(xorWriter)
-	x.w = w
-	x.key = key
-	return x
-}
-
-func (x *xorWriter) Write(p []byte) (n int, err error) {
-	c := x.key[0]
-	for i := 0; i < len(p); i++ {
-		p[i] ^= c
-	}
-
-	return x.w.Write(p)
+	go fasthttp.ReleaseRequest(req1)
+	defer fasthttp.ReleaseResponse(resp)
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	ctx.Write([]byte(resp.Header.String()))
+	ctx.Write(resp.Body())
 }

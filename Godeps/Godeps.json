@@ -1,9 +1,26 @@
 {
 	"ImportPath": "github.com/phuslu/fetchserver",
-	"GoVersion": "go1.5",
-	"Packages": [
-		"./..."
-	],
+	"GoVersion": "go1.5.2",
 	"Deps": [
+		{
+			"ImportPath": "github.com/klauspost/compress/flate",
+			"Rev": "f7ff951069c7f2881d751de537527600b2138d81"
+		},
+		{
+			"ImportPath": "github.com/klauspost/compress/gzip",
+			"Rev": "f7ff951069c7f2881d751de537527600b2138d81"
+		},
+		{
+			"ImportPath": "github.com/klauspost/cpuid",
+			"Rev": "c9fd3fcd8d33cb370087cac58108ce1e5578440d"
+		},
+		{
+			"ImportPath": "github.com/klauspost/crc32",
+			"Rev": "41b6596e004cf56ede13d98d16f50cf2742ab559"
+		},
+		{
+			"ImportPath": "github.com/valyala/fasthttp",
+			"Rev": "6a8707cd8d9b2fe3f0544fad69e1ac4428398874"
+		}
 	]
 }
