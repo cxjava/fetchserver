@@ -6,4 +6,4 @@ import (
 	"syscall"
 )
 
-var reusePort = syscall.SO_REUSEPORT
+const soReusePort = syscall.SO_REUSEPORT

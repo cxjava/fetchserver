@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"sync"
 	"time"
 )
 
@@ -17,13 +18,37 @@ var (
 	CookieExpireUnlimited = zeroTime
 )
 
+// AcquireCookie returns an empty Cookie object from the pool.
+//
+// The returned object may be returned back to the pool with ReleaseCookie.
+// This allows reducing GC load.
+func AcquireCookie() *Cookie {
+	return cookiePool.Get().(*Cookie)
+}
+
+// ReleaseCookie returns the Cookie object acquired with AcquireCookie back
+// to the pool.
+//
+// Do not access released Cookie object, otherwise data races may occur.
+func ReleaseCookie(c *Cookie) {
+	c.Reset()
+	cookiePool.Put(c)
+}
+
+var cookiePool = &sync.Pool{
+	New: func() interface{} {
+		return &Cookie{}
+	},
+}
+
 // Cookie represents HTTP response cookie.
 //
-// Do not copy Cookie obects. Create new obect and use CopyTo instead.
+// Do not copy Cookie objects. Create new object and use CopyTo instead.
 //
-// It is unsafe modifying/reading Cookie instance from concurrently
-// running goroutines.
+// Cookie instance MUST NOT be used from concurrently running goroutines.
 type Cookie struct {
+	noCopy noCopy
+
 	key    []byte
 	value  []byte
 	expire time.Time
@@ -73,7 +98,7 @@ func (c *Cookie) SetDomain(domain string) {
 	c.domain = append(c.domain[:0], domain...)
 }
 
-// SetDomain
+// SetDomainBytes sets cookie domain.
 func (c *Cookie) SetDomainBytes(domain []byte) {
 	c.domain = append(c.domain[:0], domain...)
 }
@@ -146,10 +171,10 @@ func (c *Cookie) Reset() {
 // the extended dst.
 func (c *Cookie) AppendBytes(dst []byte) []byte {
 	if len(c.key) > 0 {
-		dst = appendQuotedArg(dst, c.key)
+		dst = AppendQuotedArg(dst, c.key)
 		dst = append(dst, '=')
 	}
-	dst = appendQuotedArg(dst, c.value)
+	dst = AppendQuotedArg(dst, c.value)
 
 	if !c.expire.IsZero() {
 		c.bufKV.value = AppendHTTPDate(c.bufKV.value[:0], c.expire)
@@ -215,17 +240,17 @@ func (c *Cookie) ParseBytes(src []byte) error {
 		if len(kv.key) == 0 && len(kv.value) == 0 {
 			continue
 		}
-		switch {
-		case bytes.Equal(strCookieExpires, kv.key):
+		switch string(kv.key) {
+		case "expires":
 			v := unsafeBytesToStr(kv.value)
-			exptime, err := time.ParseInLocation(time.RFC1123, v, gmtLocation)
+			exptime, err := time.ParseInLocation(time.RFC1123, v, time.UTC)
 			if err != nil {
 				return err
 			}
 			c.expire = exptime
-		case bytes.Equal(strCookieDomain, kv.key):
+		case "domain":
 			c.domain = append(c.domain[:0], kv.value...)
-		case bytes.Equal(strCookiePath, kv.key):
+		case "path":
 			c.path = append(c.path[:0], kv.value...)
 		}
 	}
@@ -251,10 +276,10 @@ func appendRequestCookieBytes(dst []byte, cookies []argsKV) []byte {
 	for i, n := 0, len(cookies); i < n; i++ {
 		kv := &cookies[i]
 		if len(kv.key) > 0 {
-			dst = appendQuotedArg(dst, kv.key)
+			dst = AppendQuotedArg(dst, kv.key)
 			dst = append(dst, '=')
 		}
-		dst = appendQuotedArg(dst, kv.value)
+		dst = AppendQuotedArg(dst, kv.value)
 		if i+1 < n {
 			dst = append(dst, ';', ' ')
 		}

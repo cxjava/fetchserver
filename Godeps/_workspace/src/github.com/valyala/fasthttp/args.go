@@ -4,16 +4,40 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"sync"
 )
+
+// AcquireArgs returns an empty Args object from the pool.
+//
+// The returned Args may be returned to the pool with ReleaseArgs
+// when no longer needed. This allows reducing GC load.
+func AcquireArgs() *Args {
+	return argsPool.Get().(*Args)
+}
+
+// ReleaseArgs returns the object acquired via AquireArgs to the pool.
+//
+// Do not access the released Args object, otherwise data races may occur.
+func ReleaseArgs(a *Args) {
+	a.Reset()
+	argsPool.Put(a)
+}
+
+var argsPool = &sync.Pool{
+	New: func() interface{} {
+		return &Args{}
+	},
+}
 
 // Args represents query arguments.
 //
 // It is forbidden copying Args instances. Create new instances instead
 // and use CopyTo().
 //
-// It is unsafe modifying/reading Args instance from concurrently
-// running goroutines.
+// Args instance MUST NOT be used from concurrently running goroutines.
 type Args struct {
+	noCopy noCopy
+
 	args  []argsKV
 	bufKV argsKV
 	buf   []byte
@@ -88,10 +112,10 @@ func (a *Args) QueryString() []byte {
 func (a *Args) AppendBytes(dst []byte) []byte {
 	for i, n := 0, len(a.args); i < n; i++ {
 		kv := &a.args[i]
-		dst = appendQuotedArg(dst, kv.key)
+		dst = AppendQuotedArg(dst, kv.key)
 		if len(kv.value) > 0 {
 			dst = append(dst, '=')
-			dst = appendQuotedArg(dst, kv.value)
+			dst = AppendQuotedArg(dst, kv.value)
 		}
 		if i+1 < n {
 			dst = append(dst, '&')
@@ -116,7 +140,7 @@ func (a *Args) Del(key string) {
 
 // DelBytes deletes argument with the given key from query args.
 func (a *Args) DelBytes(key []byte) {
-	a.args = delArg(a.args, key)
+	a.args = delAllArgs(a.args, key)
 }
 
 // Set sets 'key=value' argument.
@@ -154,6 +178,22 @@ func (a *Args) Peek(key string) []byte {
 // Returned value is valid until the next Args call.
 func (a *Args) PeekBytes(key []byte) []byte {
 	return peekArgBytes(a.args, key)
+}
+
+// PeekMulti returns all the arg values for the given key.
+func (a *Args) PeekMulti(key string) [][]byte {
+	var values [][]byte
+	a.VisitAll(func(k, v []byte) {
+		if string(k) == key {
+			values = append(values, v)
+		}
+	})
+	return values
+}
+
+// PeekMultiBytes returns all the arg values for the given key.
+func (a *Args) PeekMultiBytes(key []byte) [][]byte {
+	return a.PeekMulti(unsafeBytesToStr(key))
 }
 
 // Has returns true if the given key exists in Args.
@@ -246,14 +286,15 @@ func copyArgs(dst, src []argsKV) []argsKV {
 	return dst
 }
 
-func delArg(args []argsKV, key []byte) []argsKV {
+func delAllArgs(args []argsKV, key []byte) []argsKV {
 	for i, n := 0, len(args); i < n; i++ {
 		kv := &args[i]
 		if bytes.Equal(kv.key, key) {
 			tmp := *kv
 			copy(args[i:], args[i+1:])
-			args[n-1] = tmp
-			return args[:n-1]
+			n--
+			args[n] = tmp
+			args = args[:n]
 		}
 	}
 	return args
@@ -268,19 +309,7 @@ func setArg(h []argsKV, key, value []byte) []argsKV {
 			return h
 		}
 	}
-
-	if cap(h) > n {
-		h = h[:n+1]
-		kv := &h[n]
-		kv.key = append(kv.key[:0], key...)
-		kv.value = append(kv.value[:0], value...)
-		return h
-	}
-
-	var kv argsKV
-	kv.key = append(kv.key, key...)
-	kv.value = append(kv.value, value...)
-	return append(h, kv)
+	return appendArg(h, key, value)
 }
 
 func appendArg(args []argsKV, key, value []byte) []argsKV {

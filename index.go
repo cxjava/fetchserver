@@ -18,6 +18,7 @@ import (
 	"github.com/phuslu/fetchserver/Godeps/_workspace/src/github.com/klauspost/compress/flate"
 	"github.com/phuslu/fetchserver/Godeps/_workspace/src/github.com/klauspost/compress/gzip"
 	"github.com/phuslu/fetchserver/Godeps/_workspace/src/github.com/valyala/fasthttp"
+	"github.com/phuslu/fetchserver/Godeps/_workspace/src/github.com/valyala/fasthttp/reuseport"
 )
 
 const (
@@ -51,7 +52,19 @@ func main() {
 
 	addr := strings.Join(parts, ":")
 	fmt.Fprintf(os.Stdout, "Start ListenAndServe on %v\n", addr)
-	if err := fasthttp.ListenAndServe(addr, handler); err != nil {
+
+	// windows
+	// if err := fasthttp.ListenAndServe(addr, handler); err != nil {
+	// 		panic(err)
+	// }
+
+	listener, err := reuseport.Listen("tcp4", addr)
+	if err != nil {
+		panic(err)
+	}
+	defer listener.Close()
+
+	if err := fasthttp.Serve(listener, handler); err != nil {
 		panic(err)
 	}
 }
@@ -167,7 +180,7 @@ func handler(ctx *fasthttp.RequestCtx) {
 		req1.Header.Del("Content-Encoding")
 	}
 
-	logger.Printf("%s \"%s %s -%+v\"- -", ctx.RemoteAddr(), string(req1.Header.Method()), string(req1.URI().FullURI()), string(req1.Body()))
+	logger.Printf("%s \"%s %s -", ctx.RemoteAddr(), string(req1.Header.Method()), string(req1.URI().FullURI()))
 
 	var paramsPreifx string = "X-Urlfetch-"
 	params := map[string]string{}
@@ -190,7 +203,7 @@ func handler(ctx *fasthttp.RequestCtx) {
 
 	var resp = fasthttp.AcquireResponse()
 	for i := 0; i < 2; i++ {
-		err = fasthttp.Do(req1, resp)
+		err = fasthttp.DoTimeout(req1, resp, 30*time.Second)
 		if err == nil {
 			break
 		}
@@ -210,6 +223,6 @@ func handler(ctx *fasthttp.RequestCtx) {
 	go fasthttp.ReleaseRequest(req1)
 	defer fasthttp.ReleaseResponse(resp)
 	ctx.SetStatusCode(fasthttp.StatusOK)
-	ctx.Write([]byte(resp.Header.String()))
+	ctx.Write(resp.Header.Header())
 	ctx.Write(resp.Body())
 }

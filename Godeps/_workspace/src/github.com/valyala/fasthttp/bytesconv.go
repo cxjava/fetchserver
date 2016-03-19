@@ -12,13 +12,36 @@ import (
 	"unsafe"
 )
 
-var gmtLocation = func() *time.Location {
-	x, err := time.LoadLocation("GMT")
-	if err != nil {
-		panic(fmt.Sprintf("cannot load GMT location: %s", err))
+// AppendHTMLEscape appends html-escaped s to dst and returns the extended dst.
+func AppendHTMLEscape(dst []byte, s string) []byte {
+	var prev int
+	var sub string
+	for i, n := 0, len(s); i < n; i++ {
+		sub = ""
+		switch s[i] {
+		case '<':
+			sub = "&lt;"
+		case '>':
+			sub = "&gt;"
+		case '"':
+			sub = "&quot;"
+		case '\'':
+			sub = "&#39;"
+		}
+		if len(sub) > 0 {
+			dst = append(dst, s[prev:i]...)
+			dst = append(dst, sub...)
+			prev = i + 1
+		}
 	}
-	return x
-}()
+	return append(dst, s[prev:]...)
+}
+
+// AppendHTMLEscapeBytes appends html-escaped s to dst and returns
+// the extended dst.
+func AppendHTMLEscapeBytes(dst, s []byte) []byte {
+	return AppendHTMLEscape(dst, unsafeBytesToStr(s))
+}
 
 // AppendIPv4 appends string representation of the given ip v4 to dst
 // and returns the extended dst.
@@ -78,7 +101,9 @@ func ParseIPv4(dst net.IP, ipStr []byte) (net.IP, error) {
 // AppendHTTPDate appends HTTP-compliant (RFC1123) representation of date
 // to dst and returns the extended dst.
 func AppendHTTPDate(dst []byte, date time.Time) []byte {
-	return date.In(gmtLocation).AppendFormat(dst, time.RFC1123)
+	dst = date.In(time.UTC).AppendFormat(dst, time.RFC1123)
+	copy(dst[len(dst)-3:], strGMT)
+	return dst
 }
 
 // ParseHTTPDate parses HTTP-compliant (RFC1123) date.
@@ -113,7 +138,7 @@ func AppendUint(dst []byte, n int) []byte {
 func ParseUint(buf []byte) (int, error) {
 	v, n, err := parseUintBuf(buf)
 	if n != len(buf) {
-		return -1, fmt.Errorf("only %b bytes out of %d bytes exhausted when parsing int %q", n, len(buf), buf)
+		return -1, fmt.Errorf("only %d bytes out of %d bytes exhausted when parsing int %q", n, len(buf), buf)
 	}
 	return v, err
 }
@@ -148,7 +173,7 @@ func ParseUfloat(buf []byte) (float64, error) {
 	}
 	b := buf
 	var v uint64
-	var offset float64 = 1.0
+	var offset = 1.0
 	var pointFound bool
 	for i, c := range b {
 		if c < '0' || c > '9' {
@@ -309,9 +334,24 @@ func unsafeBytesToStr(b []byte) string {
 	return *(*string)(unsafe.Pointer(&b))
 }
 
-func appendQuotedArg(dst, v []byte) []byte {
-	for _, c := range v {
-		if c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '/' || c == '.' {
+// AppendQuotedArg appends url-encoded src to dst and returns appended dst.
+func AppendQuotedArg(dst, src []byte) []byte {
+	for _, c := range src {
+		// See http://www.w3.org/TR/html5/forms.html#form-submission-algorithm
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '*' || c == '-' || c == '.' || c == '_' {
+			dst = append(dst, c)
+		} else {
+			dst = append(dst, '%', hexCharUpper(c>>4), hexCharUpper(c&15))
+		}
+	}
+	return dst
+}
+
+func appendQuotedPath(dst, src []byte) []byte {
+	for _, c := range src {
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '/' || c == '.' || c == ',' || c == '=' || c == ':' || c == '&' || c == '~' || c == '-' || c == '_' {
 			dst = append(dst, c)
 		} else {
 			dst = append(dst, '%', hexCharUpper(c>>4), hexCharUpper(c&15))

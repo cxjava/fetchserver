@@ -1,10 +1,19 @@
+[![Build Status](https://travis-ci.org/valyala/fasthttp.svg)](https://travis-ci.org/valyala/fasthttp)
+[![GoDoc](https://godoc.org/github.com/valyala/fasthttp?status.svg)](http://godoc.org/github.com/valyala/fasthttp)
+[![Coverage](http://gocover.io/_badge/github.com/valyala/fasthttp)](http://gocover.io/github.com/valyala/fasthttp)
+[![Go Report](http://goreportcard.com/badge/valyala/fasthttp)](http://goreportcard.com/report/valyala/fasthttp)
+
 # fasthttp
 Fast HTTP implementation for Go.
 
 Currently fasthttp is successfully used in a production serving 100K rps from 1M
 concurrent keep-alive connections on a single server.
 
-[![Build Status](https://travis-ci.org/valyala/fasthttp.svg)](https://travis-ci.org/valyala/fasthttp)
+[TechEmpower Benchmark round 12 results](https://www.techempower.com/benchmarks/#section=data-r12&hw=peak&test=plaintext)
+
+[Server Benchmarks](#http-server-performance-comparison-with-nethttp)
+
+[Client Benchmarks](#http-client-comparison-with-nethttp)
 
 [Documentation](https://godoc.org/github.com/valyala/fasthttp)
 
@@ -14,7 +23,7 @@ concurrent keep-alive connections on a single server.
 
 [Switching from net/http to fasthttp](#switching-from-nethttp-to-fasthttp)
 
-[Fasthttp best practicies](#fasthttp-best-practicies)
+[Fasthttp best practices](#fasthttp-best-practices)
 
 [Tricks with byte buffers](#tricks-with-byte-buffers)
 
@@ -22,11 +31,12 @@ concurrent keep-alive connections on a single server.
 
 # HTTP server performance comparison with [net/http](https://golang.org/pkg/net/http/)
 
-In short, fasthttp server is up to 10 times faster than net/http. Below are benchmark results.
+In short, fasthttp server is up to 10 times faster than net/http.
+Below are benchmark results.
 
-GOMAXPROCS=1
+*GOMAXPROCS=1*
 
-net/http:
+net/http server:
 ```
 $ GOMAXPROCS=1 go test -bench=NetHTTPServerGet -benchmem -benchtime=5s
 PASS
@@ -40,7 +50,7 @@ BenchmarkNetHTTPServerGet10ReqPerConn10KClients 	  500000	     13270 ns/op	    2
 BenchmarkNetHTTPServerGet100ReqPerConn10KClients	  500000	     11412 ns/op	    2119 B/op	      18 allocs/op
 ```
 
-fasthttp:
+fasthttp server:
 ```
 $ GOMAXPROCS=1 go test -bench=kServerGet -benchmem -benchtime=5s
 PASS
@@ -54,9 +64,9 @@ BenchmarkServerGet10ReqPerConn10KClients 	 5000000	      1297 ns/op	       1 B/o
 BenchmarkServerGet100ReqPerConn10KClients	10000000	      1264 ns/op	       9 B/op	       0 allocs/op
 ```
 
-GOMAXPROCS=4
+*GOMAXPROCS=4*
 
-net/http:
+net/http server:
 ```
 $ GOMAXPROCS=4 go test -bench=NetHTTPServerGet -benchmem -benchtime=5s
 PASS
@@ -70,7 +80,7 @@ BenchmarkNetHTTPServerGet10ReqPerConn10KClients-4 	 2000000	      4345 ns/op	   
 BenchmarkNetHTTPServerGet100ReqPerConn10KClients-4	 2000000	      3866 ns/op	    2132 B/op	      18 allocs/op
 ```
 
-fasthttp:
+fasthttp server:
 ```
 $ GOMAXPROCS=4 go test -bench=kServerGet -benchmem -benchtime=5s
 PASS
@@ -86,48 +96,76 @@ BenchmarkServerGet100ReqPerConn10KClients-4	20000000	       384 ns/op	       4 B
 
 # HTTP client comparison with net/http
 
-In short, fasthttp client is up to 10 times faster than net/http. Below are benchmark results.
+In short, fasthttp client is up to 10 times faster than net/http.
+Below are benchmark results.
 
-GOMAXPROCS=1
+*GOMAXPROCS=1*
 
-net/http:
+net/http client:
 ```
 $ GOMAXPROCS=1 go test -bench='HTTPClient(Do|GetEndToEnd)' -benchmem -benchtime=5s
 PASS
-BenchmarkNetHTTPClientDoFastServer	  500000	     17535 ns/op	    2624 B/op	      38 allocs/op
-BenchmarkNetHTTPClientGetEndToEnd 	  200000	     56593 ns/op	    5012 B/op	      59 allocs/op
+BenchmarkNetHTTPClientDoFastServer           	  300000	     17095 ns/op	    2617 B/op	      35 allocs/op
+BenchmarkNetHTTPClientGetEndToEnd1TCP        	  200000	     54155 ns/op	    5031 B/op	      56 allocs/op
+BenchmarkNetHTTPClientGetEndToEnd10TCP       	  200000	     51260 ns/op	    5032 B/op	      56 allocs/op
+BenchmarkNetHTTPClientGetEndToEnd100TCP      	  200000	     56424 ns/op	    5037 B/op	      56 allocs/op
+BenchmarkNetHTTPClientGetEndToEnd1Inmemory   	  200000	     30739 ns/op	    5034 B/op	      57 allocs/op
+BenchmarkNetHTTPClientGetEndToEnd10Inmemory  	  200000	     31338 ns/op	    5035 B/op	      57 allocs/op
+BenchmarkNetHTTPClientGetEndToEnd100Inmemory 	  200000	     32847 ns/op	    5050 B/op	      57 allocs/op
+BenchmarkNetHTTPClientGetEndToEnd1000Inmemory	  200000	     38110 ns/op	    5157 B/op	      57 allocs/op
 ```
 
-fasthttp:
+fasthttp client:
 ```
 $ GOMAXPROCS=1 go test -bench='kClient(Do|GetEndToEnd)' -benchmem -benchtime=5s
 PASS
-BenchmarkClientDoFastServer	 5000000	      1420 ns/op	       0 B/op	       0 allocs/op
-BenchmarkClientGetEndToEnd 	  500000	     17912 ns/op	       0 B/op	       0 allocs/op
+BenchmarkClientDoFastServer           	10000000	       980 ns/op	       0 B/op	       0 allocs/op
+BenchmarkClientGetEndToEnd1TCP        	 1000000	     11197 ns/op	       0 B/op	       0 allocs/op
+BenchmarkClientGetEndToEnd10TCP       	 1000000	     11607 ns/op	       0 B/op	       0 allocs/op
+BenchmarkClientGetEndToEnd100TCP      	  500000	     12400 ns/op	       2 B/op	       0 allocs/op
+BenchmarkClientGetEndToEnd1Inmemory   	 2000000	      3853 ns/op	       0 B/op	       0 allocs/op
+BenchmarkClientGetEndToEnd10Inmemory  	 2000000	      3871 ns/op	       0 B/op	       0 allocs/op
+BenchmarkClientGetEndToEnd100Inmemory 	 2000000	      3885 ns/op	       0 B/op	       0 allocs/op
+BenchmarkClientGetEndToEnd1000Inmemory	 2000000	      3907 ns/op	       7 B/op	       0 allocs/op
 ```
 
-GOMAXPROCS=4
+*GOMAXPROCS=4*
 
-net/http:
+net/http client:
 ```
 $ GOMAXPROCS=4 go test -bench='HTTPClient(Do|GetEndToEnd)' -benchmem -benchtime=5s
 PASS
-BenchmarkNetHTTPClientDoFastServer-4	 1000000	      5795 ns/op	    2626 B/op	      38 allocs/op
-BenchmarkNetHTTPClientGetEndToEnd-4 	  500000	     19304 ns/op	    5953 B/op	      62 allocs/op
+BenchmarkNetHTTPClientDoFastServer-4           	 1000000	     10248 ns/op	    2620 B/op	      35 allocs/op
+BenchmarkNetHTTPClientGetEndToEnd1TCP-4        	  300000	     27812 ns/op	    5052 B/op	      56 allocs/op
+BenchmarkNetHTTPClientGetEndToEnd10TCP-4       	  300000	     25324 ns/op	    5036 B/op	      55 allocs/op
+BenchmarkNetHTTPClientGetEndToEnd100TCP-4      	  200000	     26820 ns/op	    5098 B/op	      55 allocs/op
+BenchmarkNetHTTPClientGetEndToEnd1Inmemory-4   	  500000	     15521 ns/op	    5040 B/op	      56 allocs/op
+BenchmarkNetHTTPClientGetEndToEnd10Inmemory-4  	  500000	     15854 ns/op	    5032 B/op	      56 allocs/op
+BenchmarkNetHTTPClientGetEndToEnd100Inmemory-4 	  500000	     16739 ns/op	    5051 B/op	      56 allocs/op
+BenchmarkNetHTTPClientGetEndToEnd1000Inmemory-4	  300000	     25085 ns/op	    5920 B/op	      58 allocs/op
 ```
 
-fasthttp:
+fasthttp client:
 ```
 $ GOMAXPROCS=4 go test -bench='kClient(Do|GetEndToEnd)' -benchmem -benchtime=5s
 PASS
-BenchmarkClientDoFastServer-4	20000000	       443 ns/op	       0 B/op	       0 allocs/op
-BenchmarkClientGetEndToEnd-4 	 1000000	      5954 ns/op	       0 B/op	       0 allocs/op
+BenchmarkClientDoFastServer-4           	20000000	       526 ns/op	       0 B/op	       0 allocs/op
+BenchmarkClientGetEndToEnd1TCP-4        	 1000000	      6706 ns/op	       0 B/op	       0 allocs/op
+BenchmarkClientGetEndToEnd10TCP-4       	 1000000	      6811 ns/op	       0 B/op	       0 allocs/op
+BenchmarkClientGetEndToEnd100TCP-4      	 1000000	      9053 ns/op	       5 B/op	       0 allocs/op
+BenchmarkClientGetEndToEnd1Inmemory-4   	 3000000	      2132 ns/op	       0 B/op	       0 allocs/op
+BenchmarkClientGetEndToEnd10Inmemory-4  	 3000000	      2081 ns/op	       0 B/op	       0 allocs/op
+BenchmarkClientGetEndToEnd100Inmemory-4 	 3000000	      2044 ns/op	       1 B/op	       0 allocs/op
+BenchmarkClientGetEndToEnd1000Inmemory-4	 3000000	      2069 ns/op	       7 B/op	       0 allocs/op
 ```
 
 # Switching from net/http to fasthttp
 
 Unfortunately, fasthttp doesn't provide API identical to net/http.
 See the [FAQ](#faq) for details.
+There is [net/http -> fasthttp handler converter](https://godoc.org/github.com/valyala/fasthttp/fasthttpadaptor),
+but it is advisable writing fasthttp request handlers by hands for gaining
+all the fasthttp advantages (especially high performance :) ).
 
 Important points:
 
@@ -135,32 +173,32 @@ Important points:
 instead of objects implementing [Handler interface](https://golang.org/pkg/net/http/#Handler).
 Fortunately, it is easy to pass bound struct methods to fasthttp:
 
-```go
-type MyHandler struct {
-	foobar string
-}
+  ```go
+  type MyHandler struct {
+  	foobar string
+  }
 
-// request handler in net/http style, i.e. method bound to MyHandler struct.
-func (h *MyHandler) HandleFastHTTP(ctx *fasthttp.RequestCtx) {
-	// notice that we may access MyHandler properties here - see h.foobar.
-	fmt.Fprintf(ctx, "Hello, world! Requested path is %q. Foobar is %q",
-		ctx.Path(), h.foobar)
-}
+  // request handler in net/http style, i.e. method bound to MyHandler struct.
+  func (h *MyHandler) HandleFastHTTP(ctx *fasthttp.RequestCtx) {
+  	// notice that we may access MyHandler properties here - see h.foobar.
+  	fmt.Fprintf(ctx, "Hello, world! Requested path is %q. Foobar is %q",
+  		ctx.Path(), h.foobar)
+  }
 
-// request handler in fasthttp style, i.e. just plain function.
-func fastHTTPHandler(ctx *fasthttp.RequestCtx) {
-	fmt.Fprintf(ctx, "Hi there! RequestURI is %q", ctx.RequestURI())
-}
+  // request handler in fasthttp style, i.e. just plain function.
+  func fastHTTPHandler(ctx *fasthttp.RequestCtx) {
+  	fmt.Fprintf(ctx, "Hi there! RequestURI is %q", ctx.RequestURI())
+  }
 
-// pass bound struct method to fasthttp
-myHandler := &MyHandler{
-	foobar: "foobar",
-}
-fasthttp.ListenAndServe(":8080", myHandler.HandleFastHTTP)
+  // pass bound struct method to fasthttp
+  myHandler := &MyHandler{
+  	foobar: "foobar",
+  }
+  fasthttp.ListenAndServe(":8080", myHandler.HandleFastHTTP)
 
-// pass plain function to fasthttp
-fasthttp.ListenAndServe(":8081", fastHTTPHandler)
-```
+  // pass plain function to fasthttp
+  fasthttp.ListenAndServe(":8081", fastHTTPHandler)
+  ```
 
 * The [RequestHandler](https://godoc.org/github.com/valyala/fasthttp#RequestHandler)
 accepts only one argument - [RequestCtx](https://godoc.org/github.com/valyala/fasthttp#RequestCtx).
@@ -168,100 +206,104 @@ It contains all the functionality required for http request processing
 and response writing. Below is an example of a simple request handler conversion
 from net/http to fasthttp.
 
-```go
-// net/http request handler
-requestHandler := func(w http.ResponseWriter, r *http.Request) {
-	switch r.URL.Path {
-	case "/foo":
-		fooHandler(w, r)
-	case "/bar":
-		barHandler(w, r)
-	default:
-		http.Error(w, "Unsupported path", http.StatusNotFound)
-	}
-}
-```
+  ```go
+  // net/http request handler
+  requestHandler := func(w http.ResponseWriter, r *http.Request) {
+  	switch r.URL.Path {
+  	case "/foo":
+  		fooHandler(w, r)
+  	case "/bar":
+  		barHandler(w, r)
+  	default:
+  		http.Error(w, "Unsupported path", http.StatusNotFound)
+  	}
+  }
+  ```
 
-```go
-// the corresponding fasthttp request handler
-requestHandler := func(ctx *fasthttp.RequestCtx) {
-	switch string(ctx.Path()) {
-	case "/foo":
-		fooHandler(ctx)
-	case "/bar":
-		barHandler(ctx)
-	default:
-		ctx.Error("Unsupported path", fasthttp.StatusNotFound)
-	}
-}
-```
+  ```go
+  // the corresponding fasthttp request handler
+  requestHandler := func(ctx *fasthttp.RequestCtx) {
+  	switch string(ctx.Path()) {
+  	case "/foo":
+  		fooHandler(ctx)
+  	case "/bar":
+  		barHandler(ctx)
+  	default:
+  		ctx.Error("Unsupported path", fasthttp.StatusNotFound)
+  	}
+  }
+  ```
 
 * Fasthttp allows setting response headers and writing response body
-in arbitray order. There is no 'headers first, then body' restriction
+in arbitrary order. There is no 'headers first, then body' restriction
 like in net/http. The following code is valid for fasthttp:
-```go
-requestHandler := func(ctx *fasthttp.RequestCtx) {
-	// set some headers and status code first
-	ctx.SetContentType("foo/bar")
-	ctx.SetStatusCode(fasthttp.StatusOK)
 
-	// then write the first part of body
-	fmt.Fprintf(ctx, "this is the first part of body\n")
+  ```go
+  requestHandler := func(ctx *fasthttp.RequestCtx) {
+  	// set some headers and status code first
+  	ctx.SetContentType("foo/bar")
+  	ctx.SetStatusCode(fasthttp.StatusOK)
 
-	// then set more headers
-	ctx.Response.Header.Set("Foo-Bar", "baz")
+  	// then write the first part of body
+  	fmt.Fprintf(ctx, "this is the first part of body\n")
 
-	// then write more body
-	fmt.Fprintf(ctx, "this is the second part of body\n")
+  	// then set more headers
+  	ctx.Response.Header.Set("Foo-Bar", "baz")
 
-	// then override already written body
-	ctx.SetBody([]byte("this is completely new body contents"))
+  	// then write more body
+  	fmt.Fprintf(ctx, "this is the second part of body\n")
 
-	// then update status code
-	ctx.SetStatusCode(fasthttp.StatusNotFound)
+  	// then override already written body
+  	ctx.SetBody([]byte("this is completely new body contents"))
 
-	// basically, anything may be updated many times before
-	// returning from RequestHandler.
-	//
-	// Unlike net/http fasthttp doesn't put response to the wire until
-	// returning from RequestHandler.
-}
-```
+  	// then update status code
+  	ctx.SetStatusCode(fasthttp.StatusNotFound)
+
+  	// basically, anything may be updated many times before
+  	// returning from RequestHandler.
+  	//
+  	// Unlike net/http fasthttp doesn't put response to the wire until
+  	// returning from RequestHandler.
+  }
+  ```
 
 * Fasthttp doesn't provide [ServeMux](https://golang.org/pkg/net/http/#ServeMux),
-since I believe third-party request routers like
-[fasthttprouter](https://github.com/buaazp/fasthttprouter) must be used instead,
-Net/http code with simple ServeMux is trivially converted
-to fasthttp code:
+but there are more powerful third-party routers with fasthttp support exist:
 
-```go
-// net/http code
+  * [fasthttp-routing](https://github.com/qiangxue/fasthttp-routing)
+  * [fasthttprouter](https://github.com/buaazp/fasthttprouter)
+  * [echo v2](https://github.com/labstack/echo)
 
-m := &http.ServeMux{}
-m.HandleFunc("/foo", fooHandlerFunc)
-m.HandleFunc("/bar", barHandlerFunc)
-m.Handle("/baz", bazHandler)
+  Net/http code with simple ServeMux is trivially converted to fasthttp code:
 
-http.ListenAndServe(":80", m)
-```
+  ```go
+  // net/http code
 
-```go
-// the corresponding fasthttp code
-m := func(ctx *fasthttp.RequestCtx) {
-	switch string(ctx.Path()) {
-	case "/foo":
-		fooHandlerFunc(ctx)
-	case "/bar":
-		barHandlerFunc(ctx)
-	case "/baz":
-		bazHandler.HandlerFunc(ctx)
-	default:
-		ctx.Error("not found", fasthttp.StatusNotFound)
-	}
-}
+  m := &http.ServeMux{}
+  m.HandleFunc("/foo", fooHandlerFunc)
+  m.HandleFunc("/bar", barHandlerFunc)
+  m.Handle("/baz", bazHandler)
 
-fastttp.ListenAndServe(":80", m)
-```
+  http.ListenAndServe(":80", m)
+  ```
+
+  ```go
+  // the corresponding fasthttp code
+  m := func(ctx *fasthttp.RequestCtx) {
+  	switch string(ctx.Path()) {
+  	case "/foo":
+  		fooHandlerFunc(ctx)
+  	case "/bar":
+  		barHandlerFunc(ctx)
+  	case "/baz":
+  		bazHandler.HandlerFunc(ctx)
+  	default:
+  		ctx.Error("not found", fasthttp.StatusNotFound)
+  	}
+  }
+
+  fastttp.ListenAndServe(":80", m)
+  ```
 
 * net/http -> fasthttp conversion table:
 
@@ -283,7 +325,8 @@ fastttp.ListenAndServe(":80", m)
   * r.Form -> [ctx.QueryArgs()](https://godoc.org/github.com/valyala/fasthttp#RequestCtx.QueryArgs) +
   [ctx.PostArgs()](https://godoc.org/github.com/valyala/fasthttp#RequestCtx.PostArgs)
   * r.PostForm -> [ctx.PostArgs()](https://godoc.org/github.com/valyala/fasthttp#RequestCtx.PostArgs)
-  * r.FormValue() -> [ctx.QueryArgs().Peek()](https://godoc.org/github.com/valyala/fasthttp#Args.Peek)
+  * r.FormValue() -> [ctx.FormValue()](https://godoc.org/github.com/valyala/fasthttp#RequestCtx.FormValue)
+  * r.FormFile() -> [ctx.FormFile()](https://godoc.org/github.com/valyala/fasthttp#RequestCtx.FormFile)
   * r.MultipartForm -> [ctx.MultipartForm()](https://godoc.org/github.com/valyala/fasthttp#RequestCtx.MultipartForm)
   * r.RemoteAddr -> [ctx.RemoteAddr()](https://godoc.org/github.com/valyala/fasthttp#RequestCtx.RemoteAddr)
   * r.RequestURI -> [ctx.RequestURI()](https://godoc.org/github.com/valyala/fasthttp#RequestCtx.RequestURI)
@@ -304,7 +347,7 @@ fastttp.ListenAndServe(":80", m)
   * http.Error() -> [ctx.Error()](https://godoc.org/github.com/valyala/fasthttp#RequestCtx.Error)
   * http.FileServer() -> [fasthttp.FSHandler()](https://godoc.org/github.com/valyala/fasthttp#FSHandler),
   [fasthttp.FS](https://godoc.org/github.com/valyala/fasthttp#FS)
-  * http.ServeFile() -> [ctx.SendFile()](https://godoc.org/github.com/valyala/fasthttp#RequestCtx.SendFile)
+  * http.ServeFile() -> [fasthttp.ServeFile()](https://godoc.org/github.com/valyala/fasthttp#ServeFile)
   * http.Redirect() -> [ctx.Redirect()](https://godoc.org/github.com/valyala/fasthttp#RequestCtx.Redirect)
   * http.NotFound() -> [ctx.NotFound()](https://godoc.org/github.com/valyala/fasthttp#RequestCtx.NotFound)
   * http.StripPrefix() -> [fasthttp.PathRewriteFunc](https://godoc.org/github.com/valyala/fasthttp#PathRewriteFunc)
@@ -312,7 +355,7 @@ fastttp.ListenAndServe(":80", m)
 * *VERY IMPORTANT!* Fasthttp disallows holding references
 to [RequestCtx](https://godoc.org/github.com/valyala/fasthttp#RequestCtx) or to its'
 members after returning from [RequestHandler](https://godoc.org/github.com/valyala/fasthttp#RequestHandler).
-Otherwise [data races](http://blog.golang.org/race-detector) are unevitable.
+Otherwise [data races](http://blog.golang.org/race-detector) are inevitable.
 Carefully inspect all the net/http request handlers converted to fasthttp whether
 they retain references to RequestCtx or to its' members after returning.
 RequestCtx provides the following _band aids_ for this case:
@@ -335,6 +378,10 @@ by slow [RequestHandler](https://godoc.org/github.com/valyala/fasthttp#RequestHa
 So [profile](http://blog.golang.org/profiling-go-programs) and optimize your
 code after switching to fasthttp.
 
+* See also [fasthttputil](https://godoc.org/github.com/valyala/fasthttp/fasthttputil),
+[fasthttpadaptor](https://godoc.org/github.com/valyala/fasthttp/fasthttpadaptor) and
+[expvarhandler](https://godoc.org/github.com/valyala/fasthttp/expvarhandler).
+
 
 # Performance optimization tips for multi-core systems
 
@@ -343,9 +390,10 @@ code after switching to fasthttp.
 * Pin each server instance to a separate CPU core using [taskset](http://linux.die.net/man/1/taskset).
 * Ensure the interrupts of multiqueue network card are evenly distributed between CPU cores.
   See [this article](https://blog.cloudflare.com/how-to-achieve-low-latency/) for details.
+* Use Go 1.6 as it provides some considerable performance improvements.
 
 
-# Fasthttp best practicies
+# Fasthttp best practices
 
 * Do not allocate objects and `[]byte` buffers - just reuse them as much
   as possible. Fasthttp API design encourages this.
@@ -373,10 +421,11 @@ var (
 	dst []byte
 	src []byte
 )
-dst = append(dst, src...)  // is legal if dst is nil and src is nil
-copy(dst, src)  // is legal if dst is nil and src is nil
+dst = append(dst, src...)  // is legal if dst is nil and/or src is nil
+copy(dst, src)  // is legal if dst is nil and/or src is nil
 (string(src) == "")  // is true if src is nil
 (len(src) == 0)  // is true if src is nil
+src = src[:0]  // works like a charm with nil src
 
 // this for loop doesn't panic if src is nil
 for i, ch := range src {
@@ -428,7 +477,7 @@ uintBuf := fasthttp.AppendUint(nil, 1234)
   * net/http headers are stored in a `map[string][]string`. So the server
     must parse all the headers, convert them from `[]byte` to `string` and put
     them into the map before calling user-provided request handler.
-    This all requires unnesessary memory allocations avoided by fasthttp.
+    This all requires unnecessary memory allocations avoided by fasthttp.
   * net/http client API requires creating new response object per each request.
 
 * *Why fasthttp API is incompatible with net/http?*
@@ -446,7 +495,7 @@ uintBuf := fasthttp.AppendUint(nil, 1234)
   There are [plans](TODO) for adding HTTP/2.0 and WebSockets support
   in the future.
   In the mean time, third parties may use [RequestCtx.Hijack](https://godoc.org/github.com/valyala/fasthttp#RequestCtx.Hijack)
-  for implementing these goodies.
+  for implementing these goodies. See [the first third-party websocket implementation on the top of fasthttp](https://github.com/leavengood/websocket).
 
 * *Are there known net/http advantages comparing to fasthttp?*
 
@@ -456,9 +505,14 @@ uintBuf := fasthttp.AppendUint(nil, 1234)
   * net/http handles more HTTP corner cases.
   * net/http should contain less bugs, since it is used and tested by much
     wider audience.
-  * Many existing web frameworks and request routers are built on top
-    of net/http.
   * net/http works on Go older than 1.5.
+
+* *Why fasthttp API prefers returning `[]byte` instead of `string`?*
+
+  Because `[]byte` to `string` conversion isn't free - it requires memory
+  allocation and copy. Feel free wrapping returned `[]byte` result into
+  `string()` if you prefer working with strings instead of byte slices.
+  But be aware that this has non-zero overhead.
 
 * *Which GO versions are supported by fasthttp?*
 
@@ -471,12 +525,14 @@ uintBuf := fasthttp.AppendUint(nil, 1234)
 
 * *Are there plans to add request routing to fasthttp?*
 
-  There are no plans to add request routing into fasthttp. I believe request
-  routing must be implemented in a separate package(s) like
-  [httprouter](https://github.com/julienschmidt/httprouter).
-  Try [fasthttprouter](https://github.com/buaazp/fasthttprouter),
-  httprouter fork for fasthttp.
-  See also [this issue](https://github.com/valyala/fasthttp/issues/8) for more info.
+  There are no plans to add request routing into fasthttp.
+  Use third-party routers with fasthttp support:
+
+    * [fasthttp-routing](https://github.com/qiangxue/fasthttp-routing)
+    * [fasthttprouter](https://github.com/buaazp/fasthttprouter)
+    * [echo v2](https://github.com/labstack/echo)
+
+  See also [this issue](https://github.com/valyala/fasthttp/issues/9) for more info.
 
 * *I detected data race in fasthttp!*
 
@@ -489,3 +545,7 @@ uintBuf := fasthttp.AppendUint(nil, 1234)
   before returning from [RequestHandler](https://godoc.org/github.com/valyala/fasthttp#RequestHandler)
   if there are references to [RequestCtx](https://godoc.org/github.com/valyala/fasthttp#RequestCtx)
   or to its' members, which may be accessed by other goroutines.
+
+* *I didn't find an answer for my question here*
+
+  Try exploring [these questions](https://github.com/valyala/fasthttp/issues?q=label%3Aquestion).

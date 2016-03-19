@@ -53,6 +53,28 @@ func Serve(ln net.Listener, handler RequestHandler) error {
 	return s.Serve(ln)
 }
 
+// ServeTLS serves HTTPS requests from the given net.Listener
+// using the given handler.
+//
+// certFile and keyFile are paths to TLS certificate and key files.
+func ServeTLS(ln net.Listener, certFile, keyFile string, handler RequestHandler) error {
+	s := &Server{
+		Handler: handler,
+	}
+	return s.ServeTLS(ln, certFile, keyFile)
+}
+
+// ServeTLSEmbed serves HTTPS requests from the given net.Listener
+// using the given handler.
+//
+// certData and keyData must contain valid TLS certificate and key data.
+func ServeTLSEmbed(ln net.Listener, certData, keyData []byte, handler RequestHandler) error {
+	s := &Server{
+		Handler: handler,
+	}
+	return s.ServeTLSEmbed(ln, certData, keyData)
+}
+
 // ListenAndServe serves HTTP requests from the given TCP addr
 // using the given handler.
 func ListenAndServe(addr string, handler RequestHandler) error {
@@ -86,6 +108,17 @@ func ListenAndServeTLS(addr, certFile, keyFile string, handler RequestHandler) e
 	return s.ListenAndServeTLS(addr, certFile, keyFile)
 }
 
+// ListenAndServeTLSEmbed serves HTTPS requests from the given TCP addr
+// using the given handler.
+//
+// certData and keyData must contain valid TLS certificate and key data.
+func ListenAndServeTLSEmbed(addr string, certData, keyData []byte, handler RequestHandler) error {
+	s := &Server{
+		Handler: handler,
+	}
+	return s.ListenAndServeTLSEmbed(addr, certData, keyData)
+}
+
 // RequestHandler must process incoming requests.
 //
 // RequestHandler must call ctx.TimeoutError() before returning
@@ -104,6 +137,8 @@ type RequestHandler func(ctx *RequestCtx)
 //
 // It is safe to call Server methods from concurrently running goroutines.
 type Server struct {
+	noCopy noCopy
+
 	// Handler for processing incoming requests.
 	Handler RequestHandler
 
@@ -120,20 +155,26 @@ type Server struct {
 	// Per-connection buffer size for requests' reading.
 	// This also limits the maximum header size.
 	//
-	// Default buffer size is used if 0.
+	// Increase this buffer if your clients send multi-KB RequestURIs
+	// and/or multi-KB headers (for example, BIG cookies).
+	//
+	// Default buffer size is used if not set.
 	ReadBufferSize int
 
 	// Per-connection buffer size for responses' writing.
 	//
-	// Default buffer size is used if 0.
+	// Default buffer size is used if not set.
 	WriteBufferSize int
 
-	// Maximum duration for full request reading (including body).
+	// Maximum duration for reading the full request (including body).
+	//
+	// This also limits the maximum duration for idle keep-alive
+	// connections.
 	//
 	// By default request read timeout is unlimited.
 	ReadTimeout time.Duration
 
-	// Maximum duration for full response writing (including body).
+	// Maximum duration for writing the full response (including body).
 	//
 	// By default response write timeout is unlimited.
 	WriteTimeout time.Duration
@@ -147,9 +188,9 @@ type Server struct {
 	// Maximum number of requests served per connection.
 	//
 	// The server closes connection after the last request.
-	// 'Connection: close' header is added to the last request.
+	// 'Connection: close' header is added to the last response.
 	//
-	// By default unlimited number of requests served per connection.
+	// By default unlimited number of requests may be served per connection.
 	MaxRequestsPerConn int
 
 	// Maximum keep-alive connection lifetime.
@@ -157,13 +198,15 @@ type Server struct {
 	// The server closes keep-alive connection after its' lifetime
 	// expiration.
 	//
+	// See also ReadTimeout for limiting the duration of idle keep-alive
+	// connections.
+	//
 	// By default keep-alive connection lifetime is unlimited.
 	MaxKeepaliveDuration time.Duration
 
 	// Maximum request body size.
 	//
-	// The server closes incoming connection if this limit is greater than 0
-	// and the request body size exceeds the limit.
+	// The server rejects requests with bodies exceeding this limit.
 	//
 	// By default request body size is unlimited.
 	MaxRequestBodySize int
@@ -181,11 +224,39 @@ type Server struct {
 	// Rejects all non-GET requests if set to true.
 	//
 	// This option is useful as anti-DoS protection for servers
-	// accepting only GET requests. When set the request size is limited
-	// by ReadBufferSize.
+	// accepting only GET requests. The request size is limited
+	// by ReadBufferSize if GetOnly is set.
 	//
 	// Server accepts all the requests by default.
 	GetOnly bool
+
+	// Logs all errors, including the most frequent
+	// 'connection reset by peer', 'broken pipe' and 'connection timeout'
+	// errors. Such errors are common in production serving real-world
+	// clients.
+	//
+	// By default the most frequent errors such as
+	// 'connection reset by peer', 'broken pipe' and 'connection timeout'
+	// are suppressed in order to limit output log traffic.
+	LogAllErrors bool
+
+	// Header names are passed as-is without normalization
+	// if this option is set.
+	//
+	// Disabled header names' normalization may be useful only for proxying
+	// incoming requests to other servers expecting case-sensitive
+	// header names. See https://github.com/valyala/fasthttp/issues/57
+	// for details.
+	//
+	// By default request and response header names are normalized, i.e.
+	// The first letter and the first letters following dashes
+	// are uppercased, while all the other letters are lowercased.
+	// Examples:
+	//
+	//     * HOST -> Host
+	//     * content-type -> Content-Type
+	//     * cONTENT-lenGTH -> Content-Length
+	DisableHeaderNamesNormalizing bool
 
 	// Logger, which is used by RequestCtx.Logger().
 	//
@@ -231,6 +302,34 @@ func TimeoutHandler(h RequestHandler, timeout time.Duration, msg string) Request
 	}
 }
 
+// CompressHandler returns RequestHandler that transparently compresses
+// response body generated by h if the request contains 'gzip' or 'deflate'
+// 'Accept-Encoding' header.
+func CompressHandler(h RequestHandler) RequestHandler {
+	return CompressHandlerLevel(h, CompressDefaultCompression)
+}
+
+// CompressHandlerLevel returns RequestHandler that transparently compresses
+// response body generated by h if the request contains 'gzip' or 'deflate'
+// 'Accept-Encoding' header.
+//
+// Level is the desired compression level:
+//
+//     * CompressNoCompression
+//     * CompressBestSpeed
+//     * CompressBestCompression
+//     * CompressDefaultCompression
+func CompressHandlerLevel(h RequestHandler, level int) RequestHandler {
+	return func(ctx *RequestCtx) {
+		h(ctx)
+		if ctx.Request.Header.HasAcceptEncodingBytes(strGzip) {
+			ctx.Response.gzipBody(level)
+		} else if ctx.Request.Header.HasAcceptEncodingBytes(strDeflate) {
+			ctx.Response.deflateBody(level)
+		}
+	}
+}
+
 // RequestCtx contains incoming request and manages outgoing response.
 //
 // It is forbidden copying RequestCtx instances.
@@ -243,9 +342,11 @@ func TimeoutHandler(h RequestHandler, timeout time.Duration, msg string) Request
 // before return.
 //
 // It is unsafe modifying/reading RequestCtx instance from concurrently
-// running goroutines. The only exception is TimeoutError, which may be called
-// when other goroutines access RequestCtx.
+// running goroutines. The only exception is TimeoutError*, which may be called
+// while other goroutines accessing RequestCtx.
 type RequestCtx struct {
+	noCopy noCopy
+
 	// Incoming request.
 	//
 	// Copying Request by value is forbidden. Use pointer to Request instead.
@@ -277,13 +378,13 @@ type RequestCtx struct {
 	timeoutTimer    *time.Timer
 
 	hijackHandler HijackHandler
-
-	v interface{}
 }
 
 // HijackHandler must process the hijacked connection c.
 //
 // The connection c is automatically closed after returning from HijackHandler.
+//
+// The connection c must not be used after returning from the handler.
 type HijackHandler func(c net.Conn)
 
 // Hijack registers the given handler for connection hijacking.
@@ -322,7 +423,9 @@ func (ctx *RequestCtx) Hijack(handler HijackHandler) {
 // This functionality may be useful for passing arbitrary values between
 // functions involved in request processing.
 //
-// All the values stored in ctx are deleted after returning from RequestHandler.
+// All the values are removed from ctx after returning from the top
+// RequestHandler. Additionally, Close method is called on each value
+// implementing io.Closer before removing the value from ctx.
 func (ctx *RequestCtx) SetUserValue(key string, value interface{}) {
 	ctx.userValues.Set(key, value)
 }
@@ -357,6 +460,21 @@ func (ctx *RequestCtx) UserValueBytes(key []byte) interface{} {
 func (ctx *RequestCtx) IsTLS() bool {
 	_, ok := ctx.c.(*tls.Conn)
 	return ok
+}
+
+// TLSConnectionState returns TLS connection state.
+//
+// The function returns nil if the underlying connection isn't tls.Conn.
+//
+// The returned state may be used for verifying TLS version, client certificates,
+// etc.
+func (ctx *RequestCtx) TLSConnectionState() *tls.ConnectionState {
+	tlsConn, ok := ctx.c.(*tls.Conn)
+	if !ok {
+		return nil
+	}
+	state := tlsConn.ConnectionState()
+	return &state
 }
 
 type firstByteReader struct {
@@ -432,7 +550,7 @@ func (ctx *RequestCtx) ConnRequestNum() uint64 {
 // SetConnectionClose sets 'Connection: close' response header and closes
 // connection after the RequestHandler returns.
 func (ctx *RequestCtx) SetConnectionClose() {
-	ctx.Response.Header.SetConnectionClose()
+	ctx.Response.SetConnectionClose()
 }
 
 // SetStatusCode sets response status code.
@@ -497,6 +615,8 @@ func (ctx *RequestCtx) Host() []byte {
 // It doesn't return POST'ed arguments - use PostArge() for this.
 //
 // Returned arguments are valid until returning from RequestHandler.
+//
+// See also PostArgs, FormValue and FormFile.
 func (ctx *RequestCtx) QueryArgs() *Args {
 	return ctx.URI().QueryArgs()
 }
@@ -506,6 +626,8 @@ func (ctx *RequestCtx) QueryArgs() *Args {
 // It doesn't return query arguments from RequestURI - use QueryArgs for this.
 //
 // Returned arguments are valid until returning from RequestHandler.
+//
+// See also QueryArgs, FormValue and FormFile.
 func (ctx *RequestCtx) PostArgs() *Args {
 	return ctx.Request.PostArgs()
 }
@@ -519,9 +641,95 @@ func (ctx *RequestCtx) PostArgs() *Args {
 // returning from RequestHandler. Either move or copy uploaded files
 // into new place if you want retaining them.
 //
-// Returned form is valid until returning from RequestHandler.
+// Use SaveMultipartFile function for permanently saving uploaded file.
+//
+// The returned form is valid until returning from RequestHandler.
+//
+// See also FormFile and FormValue.
 func (ctx *RequestCtx) MultipartForm() (*multipart.Form, error) {
 	return ctx.Request.MultipartForm()
+}
+
+// FormFile returns uploaded file associated with the given multipart form key.
+//
+// The file is automatically deleted after returning from RequestHandler,
+// so either move or copy uploaded file into new place if you want retaining it.
+//
+// Use SaveMultipartFile function for permanently saving uploaded file.
+//
+// The returned file header is valid until returning from RequestHandler.
+func (ctx *RequestCtx) FormFile(key string) (*multipart.FileHeader, error) {
+	mf, err := ctx.MultipartForm()
+	if err != nil {
+		return nil, err
+	}
+	if mf.File == nil {
+		return nil, err
+	}
+	fhh := mf.File[key]
+	if fhh == nil {
+		return nil, ErrMissingFile
+	}
+	return fhh[0], nil
+}
+
+// ErrMissingFile may be returned from FormFile when the is no uploaded file
+// associated with the given multipart form key.
+var ErrMissingFile = errors.New("there is no uploaded file associated with the given key")
+
+// SaveMultipartFile saves multipart file fh under the given filename path.
+func SaveMultipartFile(fh *multipart.FileHeader, path string) error {
+	f, err := fh.Open()
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if ff, ok := f.(*os.File); ok {
+		return os.Rename(ff.Name(), path)
+	}
+
+	ff, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer ff.Close()
+	_, err = copyZeroAlloc(ff, f)
+	return err
+}
+
+// FormValue returns form value associated with the given key.
+//
+// The value is searched in the following places:
+//
+//   * Query string.
+//   * POST or PUT body.
+//
+// There are more fine-grained methods for obtaining form values:
+//
+//   * QueryArgs for obtaining values from query string.
+//   * PostArgs for obtaining values from POST or PUT body.
+//   * MultipartForm for obtaining values from multipart form.
+//   * FormFile for obtaining uploaded files.
+//
+// The returned value is valid until returning from RequestHandler.
+func (ctx *RequestCtx) FormValue(key string) []byte {
+	v := ctx.QueryArgs().Peek(key)
+	if len(v) > 0 {
+		return v
+	}
+	v = ctx.PostArgs().Peek(key)
+	if len(v) > 0 {
+		return v
+	}
+	mf, err := ctx.MultipartForm()
+	if err == nil && mf.Value != nil {
+		vv := mf.Value[key]
+		if len(vv) > 0 {
+			return []byte(vv[0])
+		}
+	}
+	return nil
 }
 
 // IsGet returns true if request method is GET.
@@ -619,13 +827,15 @@ func (ctx *RequestCtx) SuccessString(contentType, body string) {
 // The redirect uri may be either absolute or relative to the current
 // request uri.
 func (ctx *RequestCtx) Redirect(uri string, statusCode int) {
-	var u URI
-	ctx.URI().CopyTo(&u)
+	u := AcquireURI()
+	ctx.URI().CopyTo(u)
 	u.Update(uri)
 	ctx.redirect(u.FullURI(), statusCode)
+	ReleaseURI(u)
 }
 
-// Redirect sets 'Location: uri' response header and sets the given statusCode.
+// RedirectBytes sets 'Location: uri' response header and sets
+// the given statusCode.
 //
 // statusCode must have one of the following values:
 //
@@ -639,10 +849,8 @@ func (ctx *RequestCtx) Redirect(uri string, statusCode int) {
 // The redirect uri may be either absolute or relative to the current
 // request uri.
 func (ctx *RequestCtx) RedirectBytes(uri []byte, statusCode int) {
-	var u URI
-	ctx.URI().CopyTo(&u)
-	u.UpdateBytes(uri)
-	ctx.redirect(u.FullURI(), statusCode)
+	s := unsafeBytesToStr(uri)
+	ctx.Redirect(s, statusCode)
 }
 
 func (ctx *RequestCtx) redirect(uri []byte, statusCode int) {
@@ -660,6 +868,8 @@ func getRedirectStatusCode(statusCode int) int {
 }
 
 // SetBody sets response body to the given value.
+//
+// It is safe re-using body argument after the function returns.
 func (ctx *RequestCtx) SetBody(body []byte) {
 	ctx.Response.SetBody(body)
 }
@@ -676,24 +886,24 @@ func (ctx *RequestCtx) ResetBody() {
 
 // SendFile sends local file contents from the given path as response body.
 //
-// Note that SendFile doesn't set Content-Type for the response body,
-// so set it yourself with SetContentType() before returning
-// from RequestHandler.
-func (ctx *RequestCtx) SendFile(path string) error {
-	ifModStr := ctx.Request.Header.peek(strIfModifiedSince)
-	if len(ifModStr) > 0 {
-		if ifMod, err := ParseHTTPDate(ifModStr); err == nil {
-			lastMod, err := fsLastModified(path)
-			if err != nil {
-				return err
-			}
-			if !ifMod.Before(lastMod) {
-				ctx.NotModified()
-				return nil
-			}
-		}
-	}
-	return ctx.Response.SendFile(path)
+// This is a shortcut to ServeFile(ctx, path).
+//
+// SendFile logs all the errors via ctx.Logger.
+//
+// See also ServeFile, FSHandler and FS.
+func (ctx *RequestCtx) SendFile(path string) {
+	ServeFile(ctx, path)
+}
+
+// SendFileBytes sends local file contents from the given path as response body.
+//
+// This is a shortcut to ServeFileBytes(ctx, path).
+//
+// SendFileBytes logs all the errors via ctx.Logger.
+//
+// See also ServeFileBytes, FSHandler and FS.
+func (ctx *RequestCtx) SendFileBytes(path []byte) {
+	ServeFileBytes(ctx, path)
 }
 
 // IfModifiedSince returns true if lastModified exceeds 'If-Modified-Since'
@@ -730,6 +940,12 @@ func (ctx *RequestCtx) NotFound() {
 func (ctx *RequestCtx) Write(p []byte) (int, error) {
 	ctx.Response.AppendBody(p)
 	return len(p), nil
+}
+
+// WriteString appends s to response body.
+func (ctx *RequestCtx) WriteString(s string) (int, error) {
+	ctx.Response.AppendBodyString(s)
+	return len(s), nil
 }
 
 // PostBody returns POST request body.
@@ -797,6 +1013,9 @@ func (ctx *RequestCtx) Logger() Logger {
 //
 // TimeoutError MUST be called before returning from RequestHandler if there are
 // references to ctx and/or its members in other goroutines remain.
+//
+// Usage of this function is discouraged. Prefer eliminating ctx references
+// from pending goroutines instead of using this function.
 func (ctx *RequestCtx) TimeoutError(msg string) {
 	ctx.TimeoutErrorWithCode(msg, StatusRequestTimeout)
 }
@@ -808,6 +1027,9 @@ func (ctx *RequestCtx) TimeoutError(msg string) {
 //
 // TimeoutErrorWithCode MUST be called before returning from RequestHandler
 // if there are references to ctx and/or its members in other goroutines remain.
+//
+// Usage of this function is discouraged. Prefer eliminating ctx references
+// from pending goroutines instead of using this function.
 func (ctx *RequestCtx) TimeoutErrorWithCode(msg string, statusCode int) {
 	var resp Response
 	resp.SetStatusCode(statusCode)
@@ -822,6 +1044,9 @@ func (ctx *RequestCtx) TimeoutErrorWithCode(msg string, statusCode int) {
 //
 // TimeoutErrorWithResponse MUST be called before returning from RequestHandler
 // if there are references to ctx and/or its members in other goroutines remain.
+//
+// Usage of this function is discouraged. Prefer eliminating ctx references
+// from pending goroutines instead of using this function.
 func (ctx *RequestCtx) TimeoutErrorWithResponse(resp *Response) {
 	respCopy := &Response{}
 	resp.CopyTo(respCopy)
@@ -860,21 +1085,72 @@ func (s *Server) ListenAndServeUNIX(addr string, mode os.FileMode) error {
 //
 // certFile and keyFile are paths to TLS certificate and key files.
 func (s *Server) ListenAndServeTLS(addr, certFile, keyFile string) error {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-	}
-	ln, err := tls.Listen("tcp", addr, tlsConfig)
-	if err != nil {
-		return err
-	}
-	return s.Serve(ln)
+	return s.ServeTLS(ln, certFile, keyFile)
 }
 
-// Default maximum number of concurrent connections the Server may serve.
+// ListenAndServeTLSEmbed serves HTTPS requests from the given TCP addr.
+//
+// certData and keyData must contain valid TLS certificate and key data.
+func (s *Server) ListenAndServeTLSEmbed(addr string, certData, keyData []byte) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return s.ServeTLSEmbed(ln, certData, keyData)
+}
+
+// ServeTLS serves HTTPS requests from the given listener.
+//
+// certFile and keyFile are paths to TLS certificate and key files.
+func (s *Server) ServeTLS(ln net.Listener, certFile, keyFile string) error {
+	lnTLS, err := newTLSListener(ln, certFile, keyFile)
+	if err != nil {
+		return err
+	}
+	return s.Serve(lnTLS)
+}
+
+// ServeTLSEmbed serves HTTPS requests from the given listener.
+//
+// certData and keyData must contain valid TLS certificate and key data.
+func (s *Server) ServeTLSEmbed(ln net.Listener, certData, keyData []byte) error {
+	lnTLS, err := newTLSListenerEmbed(ln, certData, keyData)
+	if err != nil {
+		return err
+	}
+	return s.Serve(lnTLS)
+}
+
+func newTLSListener(ln net.Listener, certFile, keyFile string) (net.Listener, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("cannot load TLS key pair from certFile=%q and keyFile=%q: %s", certFile, keyFile, err)
+	}
+	return newCertListener(ln, &cert), nil
+}
+
+func newTLSListenerEmbed(ln net.Listener, certData, keyData []byte) (net.Listener, error) {
+	cert, err := tls.X509KeyPair(certData, keyData)
+	if err != nil {
+		return nil, fmt.Errorf("cannot load TLS key pair from the provided certData(%d) and keyData(%d): %s",
+			len(certData), len(keyData), err)
+	}
+	return newCertListener(ln, &cert), nil
+}
+
+func newCertListener(ln net.Listener, cert *tls.Certificate) net.Listener {
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{*cert},
+	}
+	return tls.NewListener(ln, tlsConfig)
+}
+
+// DefaultConcurrency is the maximum number of concurrent connections
+// the Server may serve by default (i.e. if Server.Concurrency isn't set).
 const DefaultConcurrency = 256 * 1024
 
 // Serve serves incoming connections from the given listener.
@@ -890,6 +1166,7 @@ func (s *Server) Serve(ln net.Listener) error {
 	wp := &workerPool{
 		WorkerFunc:      s.serveConn,
 		MaxWorkersCount: maxWorkersCount,
+		LogAllErrors:    s.LogAllErrors,
 		Logger:          s.logger(),
 	}
 	wp.Start()
@@ -918,6 +1195,9 @@ func acceptConn(s *Server, ln net.Listener, lastPerIPErrorTime *time.Time) (net.
 	for {
 		c, err := ln.Accept()
 		if err != nil {
+			if c != nil {
+				panic("BUG: net.Listener returned non-nil conn and non-nil error")
+			}
 			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
 				s.logger().Printf("Temporary error when accepting new connections: %s", netErr)
 				time.Sleep(time.Second)
@@ -982,7 +1262,7 @@ var (
 
 	// ErrKeepaliveTimeout is returned from ServeConn
 	// if the connection lifetime exceeds MaxKeepaliveDuration.
-	ErrKeepaliveTimeout = errors.New("MaxKeepaliveDuration exceeded")
+	ErrKeepaliveTimeout = errors.New("exceeded MaxKeepaliveDuration")
 )
 
 // ServeConn serves HTTP requests from the given connection.
@@ -1047,6 +1327,7 @@ func (s *Server) serveConn(c net.Conn) error {
 
 	var err error
 	var connectionClose bool
+	var isHTTP11 bool
 	var timeoutResponse *Response
 	var hijackHandler HijackHandler
 	for {
@@ -1067,7 +1348,7 @@ func (s *Server) serveConn(c net.Conn) error {
 				}
 			}
 			if err = c.SetReadDeadline(currentTime.Add(readTimeout)); err != nil {
-				break
+				panic(fmt.Sprintf("BUG: error in SetReadDeadline(%s): %s", readTimeout, err))
 			}
 		}
 
@@ -1075,19 +1356,19 @@ func (s *Server) serveConn(c net.Conn) error {
 			if br == nil {
 				br = acquireReader(ctx)
 			}
+		} else {
+			br, err = acquireByteReader(&ctx)
+		}
+
+		if err == nil {
+			if s.DisableHeaderNamesNormalizing {
+				ctx.Request.Header.DisableNormalizing()
+				ctx.Response.Header.DisableNormalizing()
+			}
 			err = ctx.Request.readLimitBody(br, s.MaxRequestBodySize, s.GetOnly)
 			if br.Buffered() == 0 || err != nil {
 				releaseReader(s, br)
 				br = nil
-			}
-		} else {
-			br, err = acquireByteReader(&ctx)
-			if err == nil {
-				err = ctx.Request.ReadLimitBody(br, s.MaxRequestBodySize)
-				if br.Buffered() == 0 || err != nil {
-					releaseReader(s, br)
-					br = nil
-				}
 			}
 		}
 
@@ -1101,19 +1382,52 @@ func (s *Server) serveConn(c net.Conn) error {
 			break
 		}
 
+		// 'Expect: 100-continue' request handling.
+		// See http://www.w3.org/Protocols/rfc2616/rfc2616-sec8.html for details.
+		if !ctx.Request.Header.noBody() && ctx.Request.MayContinue() {
+			// Send 'HTTP/1.1 100 Continue' response.
+			if bw == nil {
+				bw = acquireWriter(ctx)
+			}
+			bw.Write(strResponseContinue)
+			err = bw.Flush()
+			releaseWriter(s, bw)
+			bw = nil
+			if err != nil {
+				break
+			}
+
+			// Read request body.
+			if br == nil {
+				br = acquireReader(ctx)
+			}
+			err = ctx.Request.ContinueReadBody(br, s.MaxRequestBodySize)
+			if br.Buffered() == 0 || err != nil {
+				releaseReader(s, br)
+				br = nil
+			}
+			if err != nil {
+				break
+			}
+		}
+
+		connectionClose = ctx.Request.Header.connectionCloseFast()
+		isHTTP11 = ctx.Request.Header.IsHTTP11()
+
 		ctx.connRequestNum = connRequestNum
 		ctx.connTime = connTime
 		ctx.time = currentTime
-		ctx.Response.Reset()
 		s.Handler(ctx)
+
+		if !ctx.IsGet() && ctx.IsHead() {
+			ctx.Response.SkipBody = true
+		}
+		ctx.Request.Reset()
 
 		hijackHandler = ctx.hijackHandler
 		ctx.hijackHandler = nil
 
 		ctx.userValues.Reset()
-
-		// Remove temporary files, which may be uploaded during the request.
-		ctx.Request.RemoveMultipartFormFiles()
 
 		timeoutResponse = ctx.timeoutResponse
 		if timeoutResponse != nil {
@@ -1143,14 +1457,14 @@ func (s *Server) serveConn(c net.Conn) error {
 				}
 			}
 			if err = c.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
-				break
+				panic(fmt.Sprintf("BUG: error in SetWriteDeadline(%s): %s", writeTimeout, err))
 			}
 		}
 
-		connectionClose = ctx.Response.Header.ConnectionClose() || ctx.Request.Header.ConnectionClose()
+		connectionClose = connectionClose || ctx.Response.ConnectionClose()
 		if connectionClose {
 			ctx.Response.Header.SetCanonical(strConnection, strClose)
-		} else if !ctx.Request.Header.IsHTTP11() {
+		} else if !isHTTP11 {
 			// Set 'Connection: keep-alive' response header for non-HTTP/1.1 request.
 			// There is no need in setting this header for http/1.1, since in http/1.1
 			// connections are keep-alive by default.
@@ -1240,7 +1554,6 @@ func (s *Server) acquireHijackConn(r io.Reader, c net.Conn) *hijackConn {
 			Conn: c,
 			r:    r,
 		}
-		hjc.v = hjc
 		return hjc
 	}
 	hjc := v.(*hijackConn)
@@ -1252,13 +1565,12 @@ func (s *Server) acquireHijackConn(r io.Reader, c net.Conn) *hijackConn {
 func (s *Server) releaseHijackConn(hjc *hijackConn) {
 	hjc.Conn = nil
 	hjc.r = nil
-	s.hijackConnPool.Put(hjc.v)
+	s.hijackConnPool.Put(hjc)
 }
 
 type hijackConn struct {
 	net.Conn
 	r io.Reader
-	v interface{}
 }
 
 func (c hijackConn) Read(p []byte) (int, error) {
@@ -1291,6 +1603,7 @@ func writeResponse(ctx *RequestCtx, w *bufio.Writer) error {
 	if len(serverOld) == 0 {
 		h.server = serverOld
 	}
+	ctx.Response.Reset()
 	return err
 }
 
@@ -1323,7 +1636,9 @@ func acquireByteReader(ctxP **RequestCtx) (*bufio.Reader, error) {
 	ctx.time = t
 	*ctxP = ctx
 	if err != nil {
-		return nil, err
+		// Treat all errors as EOF on unsuccessful read
+		// of the first request byte.
+		return nil, io.EOF
 	}
 	if n != 1 {
 		panic("BUG: Reader must return at least one byte")
@@ -1352,7 +1667,6 @@ func acquireReader(ctx *RequestCtx) *bufio.Reader {
 }
 
 func releaseReader(s *Server, r *bufio.Reader) {
-	r.Reset(nil)
 	s.readerPool.Put(r)
 }
 
@@ -1371,7 +1685,6 @@ func acquireWriter(ctx *RequestCtx) *bufio.Writer {
 }
 
 func releaseWriter(s *Server, w *bufio.Writer) {
-	w.Reset(nil)
 	s.writerPool.Put(w)
 }
 
@@ -1384,7 +1697,6 @@ func (s *Server) acquireCtx(c net.Conn) *RequestCtx {
 			c: c,
 		}
 		ctx.initID()
-		ctx.v = ctx
 		return ctx
 	}
 
@@ -1405,9 +1717,10 @@ func (ctx *RequestCtx) Init(req *Request, remoteAddr net.Addr, logger Logger) {
 	ctx.c = &fakeAddrer{
 		addr: remoteAddr,
 	}
-	if logger != nil {
-		ctx.logger.logger = logger
+	if logger == nil {
+		logger = defaultLogger
 	}
+	ctx.logger.logger = logger
 	ctx.s = &fakeServer
 	ctx.initID()
 	req.CopyTo(&ctx.Request)
@@ -1456,7 +1769,7 @@ func (s *Server) releaseCtx(ctx *RequestCtx) {
 	}
 	ctx.c = nil
 	ctx.fbr.c = nil
-	s.ctxPool.Put(ctx.v)
+	s.ctxPool.Put(ctx)
 }
 
 func (s *Server) getServerName() []byte {

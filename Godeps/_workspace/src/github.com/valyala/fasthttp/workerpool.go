@@ -19,10 +19,10 @@ type workerPool struct {
 	// It must leave c unclosed.
 	WorkerFunc func(c net.Conn) error
 
-	// Maximum number of workers to create.
 	MaxWorkersCount int
 
-	// Logger used by workerPool.
+	LogAllErrors bool
+
 	Logger Logger
 
 	lock         sync.Mutex
@@ -77,12 +77,14 @@ func (wp *workerPool) Stop() {
 	wp.lock.Unlock()
 }
 
+const maxIdleWorkerDuration = 10 * time.Second
+
 func (wp *workerPool) clean() {
 	// Clean least recently used workers if they didn't serve connections
-	// for more than one second.
+	// for more than maxIdleWorkerDuration.
 	wp.lock.Lock()
 	ready := wp.ready
-	for len(ready) > 1 && time.Since(ready[0].t) > 10*time.Second {
+	for len(ready) > 1 && time.Since(ready[0].t) > maxIdleWorkerDuration {
 		// notify the worker to stop.
 		ready[0].ch <- nil
 
@@ -194,7 +196,9 @@ func (wp *workerPool) workerFunc(ch *workerChan) {
 		}
 		if err = wp.WorkerFunc(c); err != nil && err != errHijacked {
 			errStr := err.Error()
-			if !strings.Contains(errStr, "broken pipe") && !strings.Contains(errStr, "reset by peer") {
+			if wp.LogAllErrors || !(strings.Contains(errStr, "broken pipe") ||
+				strings.Contains(errStr, "reset by peer") ||
+				strings.Contains(errStr, "i/o timeout")) {
 				wp.Logger.Printf("error when serving connection %q<->%q: %s", c.LocalAddr(), c.RemoteAddr(), err)
 			}
 		}
